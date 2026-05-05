@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DNP3 Master — Fleet Monitor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --vernova-green:#005E60;
+      --vernova-green-light:#e6f4f3;
+      --bg:#f2f5f4;
+      --panel:#ffffff;
+      --border:#cbd5d1;
+      --text:#0f172a;
+      --muted:#475569;
+      --ok:#16a34a;
+      --warn:#d97706;
+      --bad:#dc2626;
+    }
+    body{ margin:0; padding:18px; background:var(--bg); color:var(--text); font-family:system-ui, Arial, sans-serif; }
+    .header{ margin-bottom:14px; }
+    .title{ font-size:22px; font-weight:800; color:var(--vernova-green); }
+    .sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+
+    .card{ background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:10px 12px; }
+
+    table{ width:100%; border-collapse:separate; border-spacing:0; font-size:14px; }
+    th, td{ padding:10px 8px; border-bottom:1px solid #eef2f3; vertical-align:middle; }
+    th{ color:var(--muted); text-align:left; font-weight:700; white-space:nowrap; }
+
+    .dot{ width:12px; height:12px; border-radius:50%; display:inline-block; margin-right:6px; }
+    .dot.ok{ background:var(--ok); }
+    .dot.warn{ background:var(--warn); }
+    .dot.bad{ background:var(--bad); }
+
+    .lamps{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+    .lamp{
+      width:14px; height:14px;
+      border-radius:50%;
+      border:2px solid var(--border);
+      background:#f8fafc;
+      cursor:pointer;
+    }
+    .lamp.on{
+      background:var(--vernova-green-light);
+      border-color:var(--vernova-green);
+      box-shadow:0 0 8px rgba(0,94,96,.35);
+    }
+    .lamp.off{ background:#f1f5f9; border-color:#cbd5e1; }
+    .lamp.disabled{ opacity:.35; cursor:not-allowed; }
+
+    /* Requested vs Actual block */
+    .meta{
+      display:flex;
+      flex-direction:column;
+      line-height:1.15;
+      min-width: 120px;
+    }
+    .actual{ font-weight:800; }
+    .requested{
+      font-size:11px;
+      color:var(--muted);
+      margin-top:3px;
+      min-height: 14px; /* reserves vertical space so rows don't jump */
+    }
+    .requested.empty{
+      visibility:hidden; /* keeps space but hides text */
+    }
+
+    /* status pill (reserved space, no layout shift) */
+    .pill-slot{
+      display:inline-flex;
+      align-items:center;
+      justify-content:flex-start;
+      min-width: 128px;   /* reserve fixed width to prevent horizontal shifts */
+      margin-left:8px;
+    }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:2px 8px;
+      border-radius:999px;
+      font-size:11px;
+      font-weight:800;
+      border:1px solid var(--border);
+      white-space:nowrap;
+    }
+    .pill.hidden{
+      visibility:hidden; /* keeps reserved space, prevents shifting */
+    }
+    .pill.pending{
+      color:var(--warn);
+      border-color: rgba(217,119,6,.45);
+      background: rgba(217,119,6,.08);
+    }
+    .pill.timeout{
+      color: var(--bad);
+      border-color: rgba(220,38,38,.45);
+      background: rgba(220,38,38,.08);
+    }
+    .spinner{
+      width:10px; height:10px;
+      border:2px solid rgba(217,119,6,.35);
+      border-top-color: var(--warn);
+      border-radius:50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .ai{ display:flex; align-items:center; gap:10px; white-space:nowrap; }
+    .ai input[type="range"]{ width:130px; }
+
+    details > summary{
+      cursor:pointer;
+      color:var(--vernova-green);
+      font-weight:700;
+      list-style:none;
+    }
+    details > summary::-webkit-details-marker{ display:none; }
+
+    .detailbox{ margin-top:8px; padding:8px; border:1px dashed var(--border); border-radius:8px; background:#fafcfc; color:var(--muted); }
+    .kvs{ display:grid; grid-template-columns:140px 1fr; gap:4px 10px; }
+  </style>
+</head>
+
+<body>
+  <div class="header">
+    <div class="title">DNP3 Master — Fleet Monitor</div>
+    <div class="sub">Actual = Class 0 telemetry. Requested = last command sent. (dnp3_master_io_v2)</div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>RTU</th>
+          <th>Endpoint</th>
+          <th>RTT</th>
+          <th>Fail</th>
+          <th>BI</th>
+          <th>AI0</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+<script>
+/*
+  Contract:
+    - Actual values displayed come ONLY from /api/rtus (Class 0 truth)
+    - Requested values are UI-side only (intent), never overwrite Actual
+
+  Improvements:
+    - "SETTING RTU" always shows for at least MIN_INDICATOR_MS
+    - No layout shift: pill and requested line reserve space even when hidden
+*/
+
+const CMD_TIMEOUT_SEC = 6;
+const AI_TOLERANCE = 0.05;
+const MIN_INDICATOR_MS = 900;  // ensures you always SEE "SETTING RTU" (even if telemetry matches quickly)
+
+const reqAI = new Map(); // rtuId -> { value:number, ts_ms:number, min_until_ms:number }
+const reqBI = new Map(); // rtuId -> Map(idx -> { value:boolean, ts_ms:number, min_until_ms:number })
+
+function nowMs(){ return Date.now(); }
+function ageSec(ts){ return ts ? Math.floor((nowMs() - ts) / 1000) : 9999; }
+function aiMatches(actual, requested){ return Math.abs(Number(actual) - Number(requested)) <= AI_TOLERANCE; }
+
+function health(r){
+  if(!r.online) return "bad";
+  if((r.consecutive_failures || 0) > 3) return "warn";
+  return "ok";
+}
+
+async function refresh(){
+  const rtus = await fetch('/api/rtus').then(r => r.json());
+  const rows = document.getElementById('rows');
+
+  // preserve open details
+  const open = new Set();
+  document.querySelectorAll("details[open]").forEach(d => open.add(d.dataset.id));
+
+  rows.innerHTML = "";
+
+  rtus.forEach(r => {
+    const h = health(r);
+    const red = (h === "bad");
+
+    const actualAi = Number(r.ai0 || 0);
+    const actualBi = r.bi || [];
+
+    // clear AI request when telemetry matches AND minimum display time has elapsed
+    if(reqAI.has(r.id)){
+      const st = reqAI.get(r.id);
+      if(aiMatches(actualAi, st.value) && nowMs() >= st.min_until_ms){
+        reqAI.delete(r.id);
+      }
+    }
+
+    // clear BI requests when telemetry matches AND minimum display time has elapsed
+    if(reqBI.has(r.id)){
+      const m = reqBI.get(r.id);
+      for(const [idx, st] of m.entries()){
+        if(actualBi[idx] === st.value && nowMs() >= st.min_until_ms){
+          m.delete(idx);
+        }
+      }
+      if(m.size === 0) reqBI.delete(r.id);
+    }
+
+    // AI pill + requested
+    let aiPillClass = "pill hidden";
+    let aiPillHtml = "";
+    let aiRequestedText = "";
+
+    if(reqAI.has(r.id)){
+      const st = reqAI.get(r.id);
+      aiRequestedText = `Requested: ${Number(st.value).toFixed(1)} V`;
+
+      if(ageSec(st.ts_ms) >= CMD_TIMEOUT_SEC){
+        aiPillClass = "pill timeout";
+        aiPillHtml = "TIMEOUT";
+      } else {
+        aiPillClass = "pill pending";
+        aiPillHtml = `<span class="spinner"></span>SETTING RTU`;
+      }
+    }
+
+    // BI pill + requested summary
+    let biPillClass = "pill hidden";
+    let biPillHtml = "";
+    let biRequestedText = "";
+
+    if(reqBI.has(r.id)){
+      const m = reqBI.get(r.id);
+      let anyTimeout = false;
+      const parts = [];
+      for(const [idx, st] of m.entries()){
+        if(ageSec(st.ts_ms) >= CMD_TIMEOUT_SEC) anyTimeout = true;
+        parts.push(`BI${idx}=${st.value ? "ON" : "OFF"}`);
+      }
+      if(parts.length) biRequestedText = `Requested: ${parts.join(", ")}`;
+
+      if(anyTimeout){
+        biPillClass = "pill timeout";
+        biPillHtml = "TIMEOUT";
+      } else {
+        biPillClass = "pill pending";
+        biPillHtml = `<span class="spinner"></span>SETTING RTU`;
+      }
+    }
+
+    const biHtml = actualBi.map((v,i) => {
+      const cls = v ? "on" : "off";
+      const dis = red ? "disabled" : "";
+      return `<span class="lamp ${cls} ${dis}"
+        onclick="${red ? "" : `sendBI('${r.id}',${i},${!v})`}"></span>`;
+    }).join("");
+
+    const reqAiLineClass = aiRequestedText ? "requested" : "requested empty";
+    const reqBiLineClass = biRequestedText ? "requested" : "requested empty";
+
+    rows.insertAdjacentHTML("beforeend", `
+<tr>
+  <td><span class="dot ${h}"></span>${h.toUpperCase()}</td>
+  <td>${r.id}</td>
+  <td>${r.endpoint}</td>
+  <td>${r.last_rtt_ms ? `${r.last_rtt_ms} ms` : "—"}</td>
+  <td>${r.consecutive_failures || 0}</td>
+
+  <td>
+    <div class="lamps">
+      ${biHtml}
+      <span class="pill-slot"><span class="${biPillClass}">${biPillHtml}</span></span>
+    </div>
+    <div class="${reqBiLineClass}">${biRequestedText || "—"}</div>
+  </td>
+
+  <td class="ai">
+    <div class="meta">
+      <div class="actual">${actualAi.toFixed(1)} V</div>
+      <div class="${reqAiLineClass}">${aiRequestedText || "—"}</div>
+    </div>
+
+    <input type="range" min="0" max="10" step="0.1"
+      value="${actualAi.toFixed(1)}"
+      ${(h !== "ok") ? "disabled title='Analog control disabled due to RTU communication state'" : ""}
+      onchange="sendAI('${r.id}', this.value)">
+
+    <span class="pill-slot"><span class="${aiPillClass}">${aiPillHtml}</span></span>
+  </td>
+
+  <td>
+    <details data-id="${r.id}" ${open.has(r.id) ? "open" : ""}>
+      <summary>Show</summary>
+      <div class="detailbox">
+        <div class="kvs">
+          <div>Last poll</div><div>${r.last_poll_ms ? new Date(r.last_poll_ms).toLocaleTimeString() : "—"}</div>
+          <div>Last success</div><div>${r.last_success_ms ? new Date(r.last_success_ms).toLocaleTimeString() : "—"}</div>
+          <div>Poll OK / Fail</div><div>${r.poll_ok_count || 0} / ${r.poll_fail_count || 0}</div>
+          <div>Last error</div><div>${r.last_error || "—"}</div>
+        </div>
+      </div>
+    </details>
+  </td>
+</tr>
+    `);
+  });
+}
+
+function sendBI(id, idx, val){
+  if(!reqBI.has(id)) reqBI.set(id, new Map());
+  const ts = nowMs();
+  reqBI.get(id).set(idx, { value: val, ts_ms: ts, min_until_ms: ts + MIN_INDICATOR_MS });
+  fetch(`/api/rtus/${id}/bi/${idx}/${val}`, { method: 'POST' });
+}
+
+function sendAI(id, val){
+  const v = Number(val);
+  const fixed = isFinite(v) ? v.toFixed(1) : "0.0";
+  const ts = nowMs();
+  reqAI.set(id, { value: Number(fixed), ts_ms: ts, min_until_ms: ts + MIN_INDICATOR_MS });
+  fetch(`/api/rtus/${id}/ai0/${fixed}`, { method: 'POST' });
+}
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
