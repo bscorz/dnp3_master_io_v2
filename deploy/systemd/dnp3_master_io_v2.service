@@ -8,7 +8,7 @@ Type=simple
 User=cic
 WorkingDirectory=/home/cic/projects/dnp3/dnp3_master_io_v2
 Environment=MASTER_LOG=info
-ExecStart=/home/cic/projects/dnp3/dnp3_master_io_v2/target/debug/dnp3_master_io_v2
+ExecStart=/home/cic/projects/dnp3/dnp3_master_io_v2/target/release/dnp3_master_io_v2
 Restart=on-failure
 RestartSec=2
 
