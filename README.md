@@ -357,5 +357,40 @@ per-RTU control permissions
 deployment templates / service files
 optional historical telemetry retention
 direct serial master support if needed later
+
+systemd Service
+Recommended service file:
+
+deploy/systemd/dnp3_master_io_v2.service
+
+Example:
+
+ini
+[Unit]
+Description=DNP3 Master Fleet Monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=cic
+WorkingDirectory=/home/cic/projects/dnp3/dnp3_master_io_v2
+Environment=MASTER_LOG=info
+ExecStart=/home/cic/projects/dnp3/dnp3_master_io_v2/target/debug/dnp3_master_io_v2
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+Install with:
+
+bash
+sudo cp deploy/systemd/dnp3_master_io_v2.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dnp3_master_io_v2.service
+Check status:
+
+sudo systemctl status dnp3_master_io_v2.service --no-pager -l
+
 Attribution
 This project uses the Step Function DNP3 Rust crate for internal demo, training, validation, and engineering evaluation use. Attribution to Step Function I/O is appreciated where protocol simulation or DNP3 stack components are referenced in internal demo materials.
