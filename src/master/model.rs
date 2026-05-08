@@ -4,6 +4,7 @@ use serde::Serialize;
 pub struct RtuSnapshot {
     pub id: String,
     pub endpoint: String,
+    pub rtu_addr: u16, // DNP3 outstation link address ("station ID")
 
     // Data
     pub bi: Vec<bool>,
@@ -22,12 +23,13 @@ pub struct RtuSnapshot {
 }
 
 impl RtuSnapshot {
-    pub fn new(id: &str, endpoint: &str) -> Self {
+    pub fn new(id: &str, endpoint: &str, rtu_addr: u16, bi_count: usize) -> Self {
         Self {
             id: id.to_string(),
             endpoint: endpoint.to_string(),
+            rtu_addr,
 
-            bi: vec![false, false, false],
+            bi: vec![false; bi_count],
             ai0: 0.0,
 
             online: false,

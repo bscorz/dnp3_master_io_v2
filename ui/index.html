@@ -127,7 +127,7 @@
 <body>
   <div class="header">
     <div class="title">DNP3 Master — Fleet Monitor</div>
-    <div class="sub">Actual = Class 0 telemetry. Requested = last command sent. (dnp3_master_io_v2)</div>
+    <div class="sub">Actual = Class 0 telemetry. Requested = last command sent. (dnp3_master_io_v3)</div>
   </div>
 
   <div class="card">
@@ -136,6 +136,7 @@
         <tr>
           <th>Status</th>
           <th>RTU</th>
+          <th>DNP Addr</th>
           <th>Endpoint</th>
           <th>RTT</th>
           <th>Fail</th>
@@ -268,6 +269,7 @@ async function refresh(){
 <tr>
   <td><span class="dot ${h}"></span>${h.toUpperCase()}</td>
   <td>${r.id}</td>
+  <td>${r.rtu_addr ?? "—"}</td>
   <td>${r.endpoint}</td>
   <td>${r.last_rtt_ms ? `${r.last_rtt_ms} ms` : "—"}</td>
   <td>${r.consecutive_failures || 0}</td>

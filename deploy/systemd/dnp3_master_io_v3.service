@@ -1,14 +1,14 @@
 [Unit]
-Description=DNP3 Master Fleet Monitor
+Description=DNP3 Master Fleet Monitor (v3)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
 User=cic
-WorkingDirectory=/home/cic/projects/dnp3/dnp3_master_io_v2
+WorkingDirectory=/home/cic/projects/dnp3/dnp3_master_io_v3
 Environment=MASTER_LOG=info
-ExecStart=/home/cic/projects/dnp3/dnp3_master_io_v2/target/release/dnp3_master_io_v2
+ExecStart=/home/cic/projects/dnp3/dnp3_master_io_v3/target/release/dnp3_master_io_v3
 Restart=on-failure
 RestartSec=2
 

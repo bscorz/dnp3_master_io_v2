@@ -1,4 +1,4 @@
-# dnp3_master_io_v2
+# dnp3_master_io_v3
 
 Raspberry Pi / Linux-based DNP3 master fleet monitor with:
 
@@ -39,7 +39,7 @@ If usage changes, contact Step Function I/O for a commercial license.
 
 ## Overview
 
-`dnp3_master_io_v2` is a DNP3 master-side monitoring and control application intended for lab, demo, kiosk, and engineering validation environments.
+`dnp3_master_io_v3` is a DNP3 master-side monitoring and control application intended for lab, demo, kiosk, and engineering validation environments.
 
 It is designed to connect to one or more DNP3 outstations/RTUs over TCP and present:
 
@@ -99,6 +99,9 @@ RTUs are defined in `rtus.toml`.
 
 ### Example
 ```toml
+# optional, defaults to 1
+master_addr = 1
+
 [[rtu]]
 id = "rtu1-tcp"
 endpoint = "172.30.1.77:20000"
@@ -108,15 +111,24 @@ rtu_addr = 1024
 id = "rtu1-serial-via-TS"
 endpoint = "172.30.1.4:20000"
 rtu_addr = 1024
+bi_count = 8     # optional, defaults to 3
 Fields
+master_addr
+Optional. DNP3 master link address. Default 1.
+
 id
-Friendly name shown in the UI
+Friendly name shown in the UI. Must be unique across the file.
 
 endpoint
-TCP endpoint of the outstation, in ip:port form
+TCP endpoint of the outstation, in ip:port form. RTUs that share
+an endpoint share one TCP connection (terminal-server scenario).
 
 rtu_addr
-DNP3 outstation link address
+DNP3 outstation link address.
+
+bi_count
+Optional. Number of binary inputs to size the snapshot for.
+Defaults to 3. Indices beyond this are ignored when reading.
 
 DNP3 Configuration
 Master Address
@@ -153,6 +165,21 @@ This project currently acts as a DNP3 TCP master.
 Even if a target RTU is reached through terminal server infrastructure or serial-over-IP equipment, this application still connects using TCP sockets.
 
 It does not currently open a local DNP3 serial master session directly.
+
+Shared TCP Connections (Terminal Server)
+RTUs are grouped by `endpoint` at startup. All RTUs that share the same
+`ip:port` share ONE TCP connection — multiple DNP3 associations are added
+to a single MasterChannel, addressed by their individual `rtu_addr`.
+
+This matters for terminal-server / serial-over-IP setups where opening
+duplicate TCP sessions to the same `ip:port` causes the device to mux
+the streams together and corrupt frames. Configure each outstation with
+the same `endpoint` and a unique `rtu_addr` and they will share the
+socket cleanly.
+
+`LinkErrorMode` is set to `Discard` so a single bad frame from one
+outstation does not tear down the shared TCP connection for everyone
+else behind the same terminal server.
 
 Ports / Access
 Local UI / API
@@ -194,6 +221,27 @@ no indicator once telemetry matches the requested value
 REST API
 List RTUs / current snapshot
 curl -s http://127.0.0.1:9002/api/rtus
+Fleet health summary
+curl -s http://127.0.0.1:9002/api/health
+
+Returns JSON:
+
+{
+  "total":  3,
+  "online": 2,
+  "offline":1,
+  "rtus": [ { "id":"...", "rtu_addr":1024, "online":true,
+              "last_success_ms":..., "consecutive_failures":0 }, ... ]
+}
+
+The endpoint always returns 200; consumers (e.g. systemd watchdogs)
+should branch on `offline > 0`.
+
+Command response codes
+- 200 OK              — command queued
+- 404 NOT_FOUND       — unknown RTU id
+- 503 SERVICE_UNAVAILABLE — per-RTU command queue full
+
 Send binary command
 Example:
 
@@ -222,7 +270,7 @@ Run
 Run with Cargo
 cargo run
 Run release binary
-./target/release/dnp3_master_io_v2
+./target/release/dnp3_master_io_v3
 Logging
 Logging level is controlled by MASTER_LOG.
 
@@ -249,6 +297,7 @@ Each RTU snapshot includes:
 
 id
 endpoint
+rtu_addr
 bi
 ai0
 online
@@ -274,7 +323,7 @@ Commands are queued and sent independently
 UI reflects actual telemetry plus request intent
 Project Structure
 text
-dnp3_master_io_v2/
+dnp3_master_io_v3/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── README.md
@@ -361,7 +410,7 @@ direct serial master support if needed later
 systemd Service
 Recommended service file:
 
-deploy/systemd/dnp3_master_io_v2.service
+deploy/systemd/dnp3_master_io_v3.service
 
 Example:
 
@@ -374,9 +423,9 @@ After=network-online.target
 [Service]
 Type=simple
 User=cic
-WorkingDirectory=/home/cic/projects/dnp3/dnp3_master_io_v2
+WorkingDirectory=/home/cic/projects/dnp3/dnp3_master_io_v3
 Environment=MASTER_LOG=info
-ExecStart=/home/cic/projects/dnp3/dnp3_master_io_v2/target/debug/dnp3_master_io_v2
+ExecStart=/home/cic/projects/dnp3/dnp3_master_io_v3/target/release/dnp3_master_io_v3
 Restart=on-failure
 RestartSec=2
 
@@ -385,12 +434,12 @@ WantedBy=multi-user.target
 Install with:
 
 bash
-sudo cp deploy/systemd/dnp3_master_io_v2.service /etc/systemd/system/
+sudo cp deploy/systemd/dnp3_master_io_v3.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now dnp3_master_io_v2.service
+sudo systemctl enable --now dnp3_master_io_v3.service
 Check status:
 
-sudo systemctl status dnp3_master_io_v2.service --no-pager -l
+sudo systemctl status dnp3_master_io_v3.service --no-pager -l
 
 Attribution
 This project uses the Step Function DNP3 Rust crate for internal demo, training, validation, and engineering evaluation use. Attribution to Step Function I/O is appreciated where protocol simulation or DNP3 stack components are referenced in internal demo materials.
