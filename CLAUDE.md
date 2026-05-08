@@ -42,8 +42,14 @@ deploy/systemd/        dnp3_master_io_v3.service
   together by some serial-over-IP devices and corrupt frames.
 - `LinkErrorMode::Discard` (not `Close`) on shared channels — one bad frame
   must not tear down the whole TCP for everyone behind a terminal server.
+- Poll cadence is configurable in `rtus.toml`: file-level
+  `poll_interval_ms` (default `1000`) is the fleet default; each `[[rtu]]`
+  may set its own `poll_interval_ms` to override. Same for
+  `offline_after_ms` at file level (default `10000`).
 - First-poll across associations on a shared channel is staggered evenly
-  across `POLL_INTERVAL_SECS` via `tokio::time::interval_at`.
+  across the *fastest* per-association period on that channel via
+  `tokio::time::interval_at` — different cadences still don't collide on
+  their first tick.
 - A per-endpoint parent task holds the `MasterChannel` alive forever
   (`std::future::pending::<()>().await`); per-association child tasks own
   only the `AssociationHandle`. Dropping the channel kills the TCP task.
@@ -74,17 +80,25 @@ files under `/etc/` — no sudo here.
 ## rtus.toml
 
 ```toml
-master_addr = 1            # optional, default 1
+master_addr      = 1       # optional, default 1
+poll_interval_ms = 1000    # optional, default 1000 (fleet-wide)
+offline_after_ms = 10000   # optional, default 10000
 
 [[rtu]]
-id        = "rtu-a"        # must be unique
-endpoint  = "10.0.0.5:20000"
-rtu_addr  = 1024
-bi_count  = 8              # optional, default 3
+id               = "rtu-a"        # must be unique
+endpoint         = "10.0.0.5:20000"
+rtu_addr         = 1024
+bi_count         = 8              # optional, default 3
+poll_interval_ms = 500            # optional per-RTU override
 ```
 
 Two RTUs with the same `endpoint` and different `rtu_addr` will share one
-TCP connection. Different endpoints get their own channel.
+TCP connection. Different endpoints get their own channel. RTUs on a
+shared channel may run at different poll cadences.
+
+Validation: `poll_interval_ms` and `offline_after_ms` must be > 0.
+A warning is logged if `offline_after_ms < 2 × slowest poll_interval_ms`
+since the RTU would flap offline between polls.
 
 ## Conventions
 

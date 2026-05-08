@@ -102,6 +102,12 @@ RTUs are defined in `rtus.toml`.
 # optional, defaults to 1
 master_addr = 1
 
+# optional fleet-wide Class 0 poll cadence (default 1000)
+poll_interval_ms = 1000
+
+# optional fleet-wide offline threshold (default 10000)
+offline_after_ms = 10000
+
 [[rtu]]
 id = "rtu1-tcp"
 endpoint = "172.30.1.77:20000"
@@ -111,10 +117,24 @@ rtu_addr = 1024
 id = "rtu1-serial-via-TS"
 endpoint = "172.30.1.4:20000"
 rtu_addr = 1024
-bi_count = 8     # optional, defaults to 3
+bi_count = 8                # optional, defaults to 3
+poll_interval_ms = 500      # optional per-RTU override
+```
+
 Fields
 master_addr
 Optional. DNP3 master link address. Default 1.
+
+poll_interval_ms
+Optional fleet-wide Class 0 poll cadence in milliseconds. Default 1000.
+Each `[[rtu]]` may set its own `poll_interval_ms` to override this.
+Must be > 0.
+
+offline_after_ms
+Optional fleet-wide offline threshold in milliseconds. Default 10000.
+An RTU is considered offline if no successful poll has occurred for
+more than this window. Should be at least ~2× the slowest configured
+poll cadence; a warning is logged at startup otherwise.
 
 id
 Friendly name shown in the UI. Must be unique across the file.
@@ -122,6 +142,7 @@ Friendly name shown in the UI. Must be unique across the file.
 endpoint
 TCP endpoint of the outstation, in ip:port form. RTUs that share
 an endpoint share one TCP connection (terminal-server scenario).
+RTUs sharing an endpoint may run at different poll cadences.
 
 rtu_addr
 DNP3 outstation link address.
@@ -129,6 +150,10 @@ DNP3 outstation link address.
 bi_count
 Optional. Number of binary inputs to size the snapshot for.
 Defaults to 3. Indices beyond this are ignored when reading.
+
+poll_interval_ms (per-RTU)
+Optional. Overrides the fleet-wide poll cadence for this RTU only.
+Must be > 0.
 
 DNP3 Configuration
 Master Address
@@ -140,11 +165,12 @@ Each configured RTU provides:
 
 outstation address: rtu_addr
 Polling
-Class 0 scan interval: 1 second
+Class 0 scan interval: configurable via `poll_interval_ms` in `rtus.toml`
+(default 1000 ms / 1 second). May be overridden per RTU.
 Offline Threshold
-An RTU is considered offline if no successful poll has occurred for more than:
-
-10 seconds
+Configurable via `offline_after_ms` in `rtus.toml` (default 10 000 ms).
+An RTU is considered offline if no successful poll has occurred for
+more than this window.
 Supported Controls
 Binary Control
 The master sends binary controls using:
@@ -398,7 +424,6 @@ MASTER_PRINT_AI=1 MASTER_PRINT_BI=1 cargo run
 Future Improvements
 Potential next steps:
 
-configurable poll intervals
 additional point support
 structured alarm/health summaries
 better command result tracking

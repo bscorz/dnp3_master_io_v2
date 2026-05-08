@@ -36,11 +36,12 @@ use master::model::RtuSnapshot;
 // Default master link address if not overridden in rtus.toml.
 const DEFAULT_MASTER_ADDR: u16 = 1;
 
-// Class 0 truth poll cadence
-const POLL_INTERVAL_SECS: u64 = 1;
+// Default Class 0 truth poll cadence if not overridden in rtus.toml.
+const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 
-// RED if no successful poll in > 10 seconds
-const OFFLINE_AFTER_MS: u64 = 10_000;
+// Default offline threshold if not overridden in rtus.toml.
+// RTU goes RED if no successful poll within this window.
+const DEFAULT_OFFLINE_AFTER_MS: u64 = 10_000;
 
 // Default BI vector size when an RTU does not specify one.
 fn default_bi_count() -> usize {
@@ -53,6 +54,14 @@ struct RtusFile {
     /// Optional master DNP3 link address. Defaults to DEFAULT_MASTER_ADDR.
     #[serde(default)]
     master_addr: Option<u16>,
+    /// Optional fleet-wide Class 0 poll cadence in milliseconds. Defaults
+    /// to DEFAULT_POLL_INTERVAL_MS. Per-RTU `poll_interval_ms` overrides this.
+    #[serde(default)]
+    poll_interval_ms: Option<u64>,
+    /// Optional fleet-wide offline threshold in milliseconds. Defaults to
+    /// DEFAULT_OFFLINE_AFTER_MS. Should be at least ~2× the slowest poll.
+    #[serde(default)]
+    offline_after_ms: Option<u64>,
     rtu: Vec<RtuConfig>,
 }
 
@@ -65,6 +74,10 @@ struct RtuConfig {
     /// Indices beyond this are ignored on read.
     #[serde(default = "default_bi_count")]
     bi_count: usize,
+    /// Optional per-RTU poll cadence override (ms). Falls back to the
+    /// file-level `poll_interval_ms`, then to DEFAULT_POLL_INTERVAL_MS.
+    #[serde(default)]
+    poll_interval_ms: Option<u64>,
 }
 
 // ---------------- COMMANDS ----------------
@@ -82,26 +95,26 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn compute_online(last_success_ms: u64) -> bool {
-    last_success_ms != 0 && now_ms().saturating_sub(last_success_ms) <= OFFLINE_AFTER_MS
+fn compute_online(last_success_ms: u64, offline_after_ms: u64) -> bool {
+    last_success_ms != 0 && now_ms().saturating_sub(last_success_ms) <= offline_after_ms
 }
 
 // ---------------- TELEMETRY HELPERS ----------------
-fn mark_success(s: &mut RtuSnapshot, start_ms: u64) {
+fn mark_success(s: &mut RtuSnapshot, start_ms: u64, offline_after_ms: u64) {
     let end = now_ms();
     s.last_success_ms = end;
     s.last_rtt_ms = end.saturating_sub(start_ms) as u32;
     s.consecutive_failures = 0;
     s.poll_ok_count += 1;
     s.last_error.clear();
-    s.online = compute_online(s.last_success_ms);
+    s.online = compute_online(s.last_success_ms, offline_after_ms);
 }
 
-fn mark_failure(s: &mut RtuSnapshot, err: &str) {
+fn mark_failure(s: &mut RtuSnapshot, err: &str, offline_after_ms: u64) {
     s.poll_fail_count += 1;
     s.consecutive_failures = s.consecutive_failures.saturating_add(1);
     s.last_error = err.to_string();
-    s.online = compute_online(s.last_success_ms);
+    s.online = compute_online(s.last_success_ms, offline_after_ms);
 }
 
 // ---------------- READ HANDLER ----------------
@@ -214,6 +227,21 @@ fn load_rtus() -> Result<RtusFile> {
         if rtu.bi_count == 0 {
             return Err(anyhow!("RTU {} has bi_count = 0", rtu.id));
         }
+        if let Some(p) = rtu.poll_interval_ms {
+            if p == 0 {
+                return Err(anyhow!("RTU {} has poll_interval_ms = 0", rtu.id));
+            }
+        }
+    }
+    if let Some(p) = cfg.poll_interval_ms {
+        if p == 0 {
+            return Err(anyhow!("poll_interval_ms = 0 in {}", path));
+        }
+    }
+    if let Some(o) = cfg.offline_after_ms {
+        if o == 0 {
+            return Err(anyhow!("offline_after_ms = 0 in {}", path));
+        }
     }
     Ok(cfg)
 }
@@ -254,6 +282,30 @@ fn main() -> Result<()> {
 // ---------------- RUN ----------------
 async fn run(cfg: RtusFile) -> Result<()> {
     let master_addr = cfg.master_addr.unwrap_or(DEFAULT_MASTER_ADDR);
+
+    // Effective fleet-wide defaults.
+    let fleet_poll_ms = cfg.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS);
+    let offline_after_ms = cfg.offline_after_ms.unwrap_or(DEFAULT_OFFLINE_AFTER_MS);
+
+    // Sanity-warn if the offline window can't tolerate even one missed poll
+    // at the slowest configured cadence — operator likely wants to bump it.
+    let slowest_poll_ms = cfg
+        .rtu
+        .iter()
+        .map(|r| r.poll_interval_ms.unwrap_or(fleet_poll_ms))
+        .max()
+        .unwrap_or(fleet_poll_ms);
+    if offline_after_ms < slowest_poll_ms.saturating_mul(2) {
+        warn!(
+            "offline_after_ms ({}) < 2× slowest poll_interval_ms ({}); RTUs may flap offline between polls",
+            offline_after_ms, slowest_poll_ms
+        );
+    }
+
+    info!(
+        "MASTER: poll cadence default={}ms, offline_after={}ms",
+        fleet_poll_ms, offline_after_ms
+    );
 
     let mut snapshots: HashMap<String, Arc<RwLock<RtuSnapshot>>> = HashMap::new();
     let mut cmd_txs: HashMap<String, mpsc::Sender<RtuCommand>> = HashMap::new();
@@ -332,21 +384,29 @@ async fn run(cfg: RtusFile) -> Result<()> {
 
             // Spawn one poll/cmd loop per association on the shared channel.
             // Stagger first-poll across associations so n outstations behind
-            // one TCP path don't all queue their first read at t=0; they get
-            // evenly spread across one POLL_INTERVAL_SECS window.
-            let period = Duration::from_secs(POLL_INTERVAL_SECS);
+            // one TCP path don't all queue their first read at t=0; spread
+            // them evenly across the *fastest* per-association period on
+            // this channel — that guarantees no two share a tick instant
+            // even when they have different cadences.
+            let stagger_window_ms = prepared
+                .iter()
+                .map(|(rtu, _, _, _)| rtu.poll_interval_ms.unwrap_or(fleet_poll_ms))
+                .min()
+                .unwrap_or(fleet_poll_ms);
             let now = Instant::now();
             for (i, (rtu, snapshot, mut rx, mut assoc)) in prepared.into_iter().enumerate() {
+                let period_ms = rtu.poll_interval_ms.unwrap_or(fleet_poll_ms);
+                let period = Duration::from_millis(period_ms);
                 let stagger_ms = if n_assocs > 1 {
-                    (POLL_INTERVAL_SECS * 1000) as usize * i / n_assocs
+                    (stagger_window_ms as usize * i / n_assocs) as u64
                 } else {
                     0
                 };
-                let first_tick = now + Duration::from_millis(stagger_ms as u64);
+                let first_tick = now + Duration::from_millis(stagger_ms);
                 tokio::task::spawn_local(async move {
                     info!(
-                        "MASTER: association {} link_addr={} on {} (offset {}ms)",
-                        rtu.id, rtu.rtu_addr, rtu.endpoint, stagger_ms
+                        "MASTER: association {} link_addr={} on {} (offset {}ms, period {}ms)",
+                        rtu.id, rtu.rtu_addr, rtu.endpoint, stagger_ms, period_ms
                     );
                     let mut poll = interval_at(first_tick, period);
                     loop {
@@ -361,12 +421,12 @@ async fn run(cfg: RtusFile) -> Result<()> {
                                 match assoc.read(ReadRequest::class_scan(Classes::class0())).await {
                                     Ok(_) => {
                                         let mut s = snapshot.write();
-                                        mark_success(&mut s, start);
+                                        mark_success(&mut s, start, offline_after_ms);
                                         debug!("POLL OK ← {} rtt={}ms", rtu.id, s.last_rtt_ms);
                                     }
                                     Err(e) => {
                                         let mut s = snapshot.write();
-                                        mark_failure(&mut s, &format!("{:?}", e));
+                                        mark_failure(&mut s, &format!("{:?}", e), offline_after_ms);
                                         warn!("POLL FAIL {} {:?}", rtu.id, e);
                                     }
                                 }

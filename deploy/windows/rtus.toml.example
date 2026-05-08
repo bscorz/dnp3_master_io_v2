@@ -1,0 +1,14 @@
+# Optional fleet-wide settings (omit to use defaults).
+# poll_interval_ms = 1000   # Class 0 poll cadence; default 1000
+# offline_after_ms = 10000  # mark RTU offline after this gap; default 10000
+
+[[rtu]]
+id = "rtu1-tcp"
+endpoint = "172.30.1.100:20000"
+rtu_addr = 1024
+# poll_interval_ms = 500    # optional per-RTU override
+
+[[rtu]]
+id = "rtu1-serial-via-TS"
+endpoint = "172.30.1.4:20000"
+rtu_addr = 1024
